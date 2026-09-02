@@ -1,0 +1,31 @@
+{
+  "name": "servicedesk-backend",
+  "version": "1.0.0",
+  "description": "Smart Employee Service Desk & Ticket Management Portal Backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "db:view": "node database/manage_db.js view",
+    "db:reset": "node database/manage_db.js reset",
+    "test:e2e": "node test_end_to_end_flow.js"
+  },
+  "keywords": [
+    "servicedesk",
+    "ticket-management",
+    "express",
+    "sqlite",
+    "sql-server"
+  ],
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.2",
+    "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  },
+  "type": "commonjs"
+}

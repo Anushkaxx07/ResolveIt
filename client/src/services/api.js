@@ -34,6 +34,12 @@ async function request(endpoint, options = {}) {
 }
 
 export const api = {
+  register: ({ name, email, password, department, role = 'Employee' }) =>
+    request('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ name, email, password, department, role }),
+    }),
+
   login: (email, password, role = 'Employee') =>
     request('/auth/login', {
       method: 'POST',

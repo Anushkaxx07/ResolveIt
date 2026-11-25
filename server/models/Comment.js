@@ -1,32 +1,54 @@
-const { all, get, run } = require('../database/db');
+const { getCollection, getNextSequence } = require('../database/db');
 
 class Comment {
   static async findByTicketId(ticketId) {
-    const query = `
-      SELECT 
-        c.CommentId,
-        c.TicketId,
-        c.UserId,
-        u.Name AS UserName,
-        u.Role AS UserRole,
-        c.Notes,
-        c.CreatedDate,
-        c.IsResolutionNote
-      FROM Comments c
-      INNER JOIN Users u ON c.UserId = u.UserId
-      WHERE c.TicketId = ?
-      ORDER BY c.CreatedDate ASC
-    `;
-    return await all(query, [ticketId]);
+    const id = Number(ticketId);
+    if (Number.isNaN(id)) return [];
+
+    return await getCollection('comments')
+      .aggregate([
+        { $match: { TicketId: id } },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'UserId',
+            foreignField: 'UserId',
+            as: 'user',
+          },
+        },
+        { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            _id: 0,
+            CommentId: 1,
+            TicketId: 1,
+            UserId: 1,
+            UserName: '$user.Name',
+            UserRole: '$user.Role',
+            Notes: 1,
+            CreatedDate: 1,
+            IsResolutionNote: 1,
+          },
+        },
+        { $sort: { CreatedDate: 1 } },
+      ])
+      .toArray();
   }
 
   static async create({ TicketId, UserId, Notes, IsResolutionNote = false }) {
-    const insertQuery = `
-      INSERT INTO Comments (TicketId, UserId, Notes, IsResolutionNote, CreatedDate)
-      VALUES (?, ?, ?, ?, datetime('now'))
-    `;
-    const result = await run(insertQuery, [TicketId, UserId, Notes.trim(), IsResolutionNote ? 1 : 0]);
-    return await get(`SELECT * FROM Comments WHERE CommentId = ?`, [result.lastID]);
+    const CommentId = await getNextSequence('CommentId');
+    const doc = {
+      CommentId,
+      TicketId: Number(TicketId),
+      UserId: Number(UserId),
+      Notes: Notes.trim(),
+      CreatedDate: new Date(),
+      IsResolutionNote: IsResolutionNote ? 1 : 0,
+    };
+
+    await getCollection('comments').insertOne(doc);
+    const { _id, ...cleanDoc } = doc;
+    return cleanDoc;
   }
 }
 

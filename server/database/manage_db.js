@@ -1,52 +1,107 @@
-const { initDB, all, run, get } = require('./db');
+const { initDB, getCollection, closeDB } = require('./db');
 
 async function viewDatabase() {
   console.log('\n--- USERS ---');
-  const users = await all(`SELECT UserId, Name, Email, Department, Role FROM Users`);
+  const users = await getCollection('users')
+    .find({}, { projection: { _id: 0, UserId: 1, Name: 1, Email: 1, Department: 1, Role: 1 } })
+    .sort({ UserId: 1 })
+    .toArray();
   console.table(users);
 
   console.log('\n--- CATEGORIES ---');
-  const categories = await all(`SELECT CategoryId, Name, Department FROM Categories`);
+  const categories = await getCollection('categories')
+    .find({}, { projection: { _id: 0, CategoryId: 1, Name: 1, Department: 1 } })
+    .sort({ CategoryId: 1 })
+    .toArray();
   console.table(categories);
 
   console.log('\n--- TICKETS ---');
-  const tickets = await all(`
-    SELECT 
-      t.TicketId,
-      t.Title,
-      c.Department,
-      t.Priority,
-      t.Status,
-      t.RequestedStatus,
-      u.Name AS Requester,
-      u2.Name AS Assignee
-    FROM Tickets t
-    JOIN Categories c ON t.CategoryId = c.CategoryId
-    JOIN Users u ON t.RequesterId = u.UserId
-    LEFT JOIN Users u2 ON t.AssigneeId = u2.UserId
-  `);
+  const tickets = await getCollection('tickets')
+    .aggregate([
+      {
+        $lookup: {
+          from: 'categories',
+          localField: 'CategoryId',
+          foreignField: 'CategoryId',
+          as: 'category',
+        },
+      },
+      { $unwind: '$category' },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'RequesterId',
+          foreignField: 'UserId',
+          as: 'requester',
+        },
+      },
+      { $unwind: '$requester' },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'AssigneeId',
+          foreignField: 'UserId',
+          as: 'assignee',
+        },
+      },
+      { $unwind: { path: '$assignee', preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          _id: 0,
+          TicketId: 1,
+          Title: 1,
+          Department: '$category.Department',
+          Priority: 1,
+          Status: 1,
+          RequestedStatus: 1,
+          Requester: '$requester.Name',
+          Assignee: { $ifNull: ['$assignee.Name', null] },
+        },
+      },
+      { $sort: { TicketId: 1 } },
+    ])
+    .toArray();
   console.table(tickets);
 
   console.log('\n--- COMMENTS ---');
-  const comments = await all(`
-    SELECT 
-      cm.CommentId,
-      cm.TicketId,
-      u.Name AS Author,
-      cm.Notes,
-      CASE WHEN cm.IsResolutionNote = 1 THEN 'Yes' ELSE 'No' END AS IsResolution
-    FROM Comments cm
-    JOIN Users u ON cm.UserId = u.UserId
-  `);
+  const comments = await getCollection('comments')
+    .aggregate([
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'UserId',
+          foreignField: 'UserId',
+          as: 'user',
+        },
+      },
+      { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          _id: 0,
+          CommentId: 1,
+          TicketId: 1,
+          Author: '$user.Name',
+          Notes: 1,
+          IsResolution: {
+            $cond: [{ $eq: ['$IsResolutionNote', 1] }, 'Yes', 'No'],
+          },
+        },
+      },
+      { $sort: { CommentId: 1 } },
+    ])
+    .toArray();
   console.table(comments);
 }
 
 async function resetDatabase() {
-  await run(`DROP TABLE IF EXISTS Notifications`);
-  await run(`DROP TABLE IF EXISTS Comments`);
-  await run(`DROP TABLE IF EXISTS Tickets`);
-  await run(`DROP TABLE IF EXISTS Categories`);
-  await run(`DROP TABLE IF EXISTS Users`);
+  await Promise.all([
+    getCollection('notifications').deleteMany({}),
+    getCollection('comments').deleteMany({}),
+    getCollection('tickets').deleteMany({}),
+    getCollection('categories').deleteMany({}),
+    getCollection('users').deleteMany({}),
+    getCollection('counters').deleteMany({}),
+  ]);
   await initDB();
   console.log('Database reset successfully.');
   await viewDatabase();
@@ -62,9 +117,11 @@ const action = process.argv[2] || 'view';
     } else {
       await viewDatabase();
     }
+    await closeDB();
     process.exit(0);
   } catch (err) {
     console.error('Error:', err);
+    await closeDB();
     process.exit(1);
   }
 })();

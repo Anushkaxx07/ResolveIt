@@ -64,7 +64,7 @@ export default function App() {
       setCategories(catRes.data || []);
       setUsers(userRes.data || []);
 
-      await Promise.all([loadTickets(), isSupportStaff ? loadDashboardStats() : Promise.resolve()]);
+      await Promise.all([loadTickets(), (isSupportStaff || isDepartmentStaff) ? loadDashboardStats() : Promise.resolve()]);
     } catch (err) {
       console.error('Failed to load initial data:', err);
       setErrorMessage('Could not connect to backend server. Make sure the server is running on port 5000.');
@@ -126,7 +126,7 @@ export default function App() {
       RequesterId: currentUser?.UserId || 1,
     });
 
-    await Promise.all([loadTickets(), isSupportStaff ? loadDashboardStats() : Promise.resolve()]);
+    await Promise.all([loadTickets(), (isSupportStaff || isDepartmentStaff) ? loadDashboardStats() : Promise.resolve()]);
     setCurrentView('tickets');
     if (res.data?.TicketId) {
       setSelectedTicketId(res.data.TicketId);
@@ -146,7 +146,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
+    <div className="min-h-screen bg-[#25232B] text-zinc-100 flex flex-col">
       <Navbar
         currentView={currentView}
         setCurrentView={(view) => {
@@ -162,7 +162,7 @@ export default function App() {
       />
 
       {errorMessage && (
-        <div className="bg-amber-600 text-white px-4 py-2 text-center text-xs font-semibold flex items-center justify-center gap-2">
+        <div className="bg-[#3E334B] border-b border-[#F2CE54]/40 text-[#F7DC7C] px-4 py-2 text-center text-xs font-semibold flex items-center justify-center gap-2">
           <span>{errorMessage}</span>
           <button
             onClick={() => {
@@ -195,7 +195,7 @@ export default function App() {
             setFilters={setFilters}
             onRefresh={() => {
               loadTickets();
-              if (isSupportStaff) loadDashboardStats();
+              if (isSupportStaff || isDepartmentStaff) loadDashboardStats();
             }}
             isLoading={isLoading}
             onNavigateToCreate={() => setCurrentView('create')}
@@ -222,14 +222,14 @@ export default function App() {
           api={api}
           onTicketUpdated={() => {
             loadTickets();
-            if (isSupportStaff) loadDashboardStats();
+            if (isSupportStaff || isDepartmentStaff) loadDashboardStats();
           }}
         />
       )}
 
-      <footer className="border-t border-slate-200 bg-white py-4 mt-8 text-center text-xs text-slate-500">
+      <footer className="border-t border-[#504C5B]/80 bg-[#323039]/60 py-4 mt-10 text-center text-xs text-zinc-500">
         <p>
-          ResolveIT Enterprise Service Desk • Authenticated as <strong>{currentUser?.Name}</strong> ({currentUser?.Role})
+          ResolveIT Enterprise Service Desk • Authenticated as <strong className="text-zinc-200 font-medium">{currentUser?.Name}</strong> <span className="text-[#A795BD]">({currentUser?.Role})</span>
         </p>
       </footer>
     </div>

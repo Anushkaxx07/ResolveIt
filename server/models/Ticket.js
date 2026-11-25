@@ -1,175 +1,257 @@
-const { all, get, run } = require('../database/db');
+const { getCollection, getNextSequence } = require('../database/db');
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildTicketLookupStages(includeAssigneeEmail = false) {
+  const project = {
+    _id: 0,
+    TicketId: 1,
+    Title: 1,
+    Description: 1,
+    Priority: 1,
+    Status: 1,
+    RequestedStatus: 1,
+    CreatedDate: 1,
+    UpdatedDate: 1,
+    ResolvedDate: 1,
+    CategoryId: '$category.CategoryId',
+    CategoryName: '$category.Name',
+    Department: '$category.Department',
+    RequesterId: '$requester.UserId',
+    RequesterName: '$requester.Name',
+    RequesterEmail: '$requester.Email',
+    RequesterDepartment: '$requester.Department',
+    AssigneeId: { $ifNull: ['$assignee.UserId', null] },
+    AssigneeName: { $ifNull: ['$assignee.Name', null] },
+    AssigneeDepartment: { $ifNull: ['$assignee.Department', null] },
+    AssigneeRole: { $ifNull: ['$assignee.Role', null] },
+  };
+
+  if (includeAssigneeEmail) {
+    project.AssigneeEmail = { $ifNull: ['$assignee.Email', null] };
+  }
+
+  return [
+    {
+      $lookup: {
+        from: 'categories',
+        localField: 'CategoryId',
+        foreignField: 'CategoryId',
+        as: 'category',
+      },
+    },
+    { $unwind: '$category' },
+    {
+      $lookup: {
+        from: 'users',
+        localField: 'RequesterId',
+        foreignField: 'UserId',
+        as: 'requester',
+      },
+    },
+    { $unwind: '$requester' },
+    {
+      $lookup: {
+        from: 'users',
+        localField: 'AssigneeId',
+        foreignField: 'UserId',
+        as: 'assignee',
+      },
+    },
+    { $unwind: { path: '$assignee', preserveNullAndEmptyArrays: true } },
+    { $project: project },
+  ];
+}
 
 class Ticket {
   static async findAll(filters = {}) {
-    const { status, priority, categoryId, department, search, requesterId, assigneeId, hasRequestedStatus } = filters;
+    const {
+      status,
+      priority,
+      categoryId,
+      department,
+      search,
+      requesterId,
+      assigneeId,
+      hasRequestedStatus,
+    } = filters;
 
-    let query = `
-      SELECT 
-        t.TicketId,
-        t.Title,
-        t.Description,
-        t.Priority,
-        t.Status,
-        t.RequestedStatus,
-        t.CreatedDate,
-        t.UpdatedDate,
-        t.ResolvedDate,
-        c.CategoryId,
-        c.Name AS CategoryName,
-        c.Department,
-        u1.UserId AS RequesterId,
-        u1.Name AS RequesterName,
-        u1.Email AS RequesterEmail,
-        u1.Department AS RequesterDepartment,
-        u2.UserId AS AssigneeId,
-        u2.Name AS AssigneeName,
-        u2.Department AS AssigneeDepartment,
-        u2.Role AS AssigneeRole
-      FROM Tickets t
-      INNER JOIN Categories c ON t.CategoryId = c.CategoryId
-      INNER JOIN Users u1 ON t.RequesterId = u1.UserId
-      LEFT JOIN Users u2 ON t.AssigneeId = u2.UserId
-      WHERE 1=1
-    `;
-
-    const params = [];
+    const preMatch = {};
 
     if (hasRequestedStatus === 'true' || hasRequestedStatus === true) {
-      query += ` AND t.RequestedStatus IS NOT NULL`;
+      preMatch.RequestedStatus = { $ne: null };
     }
 
     if (status && status !== 'All') {
-      query += ` AND t.Status = ?`;
-      params.push(status);
+      preMatch.Status = status;
     }
 
     if (priority && priority !== 'All') {
-      query += ` AND t.Priority = ?`;
-      params.push(priority);
+      preMatch.Priority = priority;
     }
 
     if (categoryId && categoryId !== 'All') {
-      query += ` AND t.CategoryId = ?`;
-      params.push(categoryId);
-    }
-
-    if (department && department !== 'All') {
-      query += ` AND c.Department = ?`;
-      params.push(department);
+      const catId = Number(categoryId);
+      if (!Number.isNaN(catId)) preMatch.CategoryId = catId;
     }
 
     if (requesterId) {
-      query += ` AND t.RequesterId = ?`;
-      params.push(requesterId);
+      const reqId = Number(requesterId);
+      if (!Number.isNaN(reqId)) preMatch.RequesterId = reqId;
     }
 
     if (assigneeId) {
-      query += ` AND t.AssigneeId = ?`;
-      params.push(assigneeId);
+      const assId = Number(assigneeId);
+      if (!Number.isNaN(assId)) preMatch.AssigneeId = assId;
     }
 
-    if (search) {
-      query += ` AND (t.Title LIKE ? OR t.Description LIKE ? OR CAST(t.TicketId AS TEXT) LIKE ?)`;
-      const searchTerm = `%${search}%`;
-      params.push(searchTerm, searchTerm, searchTerm);
+    const pipeline = [];
+    if (Object.keys(preMatch).length > 0) {
+      pipeline.push({ $match: preMatch });
     }
 
-    query += ` ORDER BY t.CreatedDate DESC`;
+    pipeline.push(...buildTicketLookupStages(false));
 
-    return await all(query, params);
+    const postMatch = {};
+    if (department && department !== 'All') {
+      postMatch.Department = department;
+    }
+
+    if (search && search.trim()) {
+      const regex = new RegExp(escapeRegex(search.trim()), 'i');
+      pipeline.push({
+        $addFields: {
+          TicketIdStr: { $toString: '$TicketId' },
+        },
+      });
+      postMatch.$or = [
+        { Title: regex },
+        { Description: regex },
+        { CategoryName: regex },
+        { TicketIdStr: regex },
+      ];
+    }
+
+    if (Object.keys(postMatch).length > 0) {
+      pipeline.push({ $match: postMatch });
+    }
+
+    if (search && search.trim()) {
+      pipeline.push({ $project: { TicketIdStr: 0 } });
+    }
+
+    pipeline.push({ $sort: { CreatedDate: -1 } });
+
+    return await getCollection('tickets').aggregate(pipeline).toArray();
   }
 
   static async findById(ticketId) {
-    const ticketQuery = `
-      SELECT 
-        t.TicketId,
-        t.Title,
-        t.Description,
-        t.Priority,
-        t.Status,
-        t.RequestedStatus,
-        t.CreatedDate,
-        t.UpdatedDate,
-        t.ResolvedDate,
-        c.CategoryId,
-        c.Name AS CategoryName,
-        c.Department,
-        u1.UserId AS RequesterId,
-        u1.Name AS RequesterName,
-        u1.Email AS RequesterEmail,
-        u1.Department AS RequesterDepartment,
-        u2.UserId AS AssigneeId,
-        u2.Name AS AssigneeName,
-        u2.Email AS AssigneeEmail,
-        u2.Department AS AssigneeDepartment,
-        u2.Role AS AssigneeRole
-      FROM Tickets t
-      INNER JOIN Categories c ON t.CategoryId = c.CategoryId
-      INNER JOIN Users u1 ON t.RequesterId = u1.UserId
-      LEFT JOIN Users u2 ON t.AssigneeId = u2.UserId
-      WHERE t.TicketId = ?
-    `;
+    const id = Number(ticketId);
+    if (Number.isNaN(id)) return null;
 
-    return await get(ticketQuery, [ticketId]);
+    const results = await getCollection('tickets')
+      .aggregate([{ $match: { TicketId: id } }, ...buildTicketLookupStages(true)])
+      .toArray();
+
+    return results[0] || null;
   }
 
   static async create({ Title, Description, CategoryId, Priority, RequesterId }) {
-    const insertQuery = `
-      INSERT INTO Tickets (Title, Description, CategoryId, Priority, Status, RequestedStatus, RequesterId, CreatedDate, UpdatedDate)
-      VALUES (?, ?, ?, ?, 'Open', NULL, ?, datetime('now'), datetime('now'))
-    `;
+    const TicketId = await getNextSequence('TicketId');
+    const now = new Date();
 
-    const result = await run(insertQuery, [Title.trim(), Description.trim(), CategoryId, Priority, RequesterId]);
-    return await this.findById(result.lastID);
+    await getCollection('tickets').insertOne({
+      TicketId,
+      Title: Title.trim(),
+      Description: Description.trim(),
+      CategoryId: Number(CategoryId),
+      Priority,
+      Status: 'Open',
+      RequestedStatus: null,
+      RequesterId: Number(RequesterId),
+      AssigneeId: null,
+      CreatedDate: now,
+      UpdatedDate: now,
+      ResolvedDate: null,
+    });
+
+    return await this.findById(TicketId);
   }
 
   static async update(ticketId, { Status, Priority, AssigneeId, CategoryId }) {
-    const existing = await get(`SELECT * FROM Tickets WHERE TicketId = ?`, [ticketId]);
+    const id = Number(ticketId);
+    if (Number.isNaN(id)) return null;
+
+    const existing = await getCollection('tickets').findOne({ TicketId: id });
     if (!existing) return null;
 
     const newStatus = Status || existing.Status;
     const newPriority = Priority || existing.Priority;
-    const newAssigneeId = AssigneeId !== undefined ? AssigneeId : existing.AssigneeId;
-    const newCategoryId = CategoryId || existing.CategoryId;
-    const resolvedDate = newStatus === 'Resolved' || newStatus === 'Closed' ? new Date().toISOString() : null;
+    const newAssigneeId =
+      AssigneeId !== undefined
+        ? AssigneeId === null || AssigneeId === ''
+          ? null
+          : Number(AssigneeId)
+        : existing.AssigneeId;
+    const newCategoryId = CategoryId ? Number(CategoryId) : existing.CategoryId;
+    const resolvedDate =
+      newStatus === 'Resolved' || newStatus === 'Closed' ? new Date() : null;
 
-    const updateSql = `
-      UPDATE Tickets 
-      SET Status = ?, Priority = ?, AssigneeId = ?, CategoryId = ?, UpdatedDate = datetime('now'), ResolvedDate = ?
-      WHERE TicketId = ?
-    `;
+    await getCollection('tickets').updateOne(
+      { TicketId: id },
+      {
+        $set: {
+          Status: newStatus,
+          Priority: newPriority,
+          AssigneeId: newAssigneeId,
+          CategoryId: newCategoryId,
+          UpdatedDate: new Date(),
+          ResolvedDate: resolvedDate,
+        },
+      }
+    );
 
-    await run(updateSql, [newStatus, newPriority, newAssigneeId, newCategoryId, resolvedDate, ticketId]);
-    return await this.findById(ticketId);
+    return await this.findById(id);
   }
 
   static async requestStatus(ticketId, { requestedStatus, staffUserId, notes }) {
     const ticket = await this.findById(ticketId);
     if (!ticket) return null;
 
-    await run(`
-      UPDATE Tickets 
-      SET RequestedStatus = ?, UpdatedDate = datetime('now')
-      WHERE TicketId = ?
-    `, [requestedStatus, ticketId]);
+    const now = new Date();
+    await getCollection('tickets').updateOne(
+      { TicketId: ticket.TicketId },
+      { $set: { RequestedStatus: requestedStatus, UpdatedDate: now } }
+    );
 
     if (notes && notes.trim()) {
-      await run(`
-        INSERT INTO Comments (TicketId, UserId, Notes, IsResolutionNote, CreatedDate)
-        VALUES (?, ?, ?, ?, datetime('now'))
-      `, [ticketId, staffUserId, `[Status Change Request: "${requestedStatus}"] - ${notes.trim()}`, requestedStatus === 'Resolved' ? 1 : 0]);
+      const CommentId = await getNextSequence('CommentId');
+      await getCollection('comments').insertOne({
+        CommentId,
+        TicketId: ticket.TicketId,
+        UserId: Number(staffUserId),
+        Notes: `[Status Change Request: "${requestedStatus}"] - ${notes.trim()}`,
+        IsResolutionNote: requestedStatus === 'Resolved' ? 1 : 0,
+        CreatedDate: now,
+      });
     }
 
     const staffName = ticket.AssigneeName || 'Department Staff';
-    const message = `${staffName} (${ticket.Department} Staff) requested status change to "${requestedStatus}" on Ticket #${ticketId}: "${ticket.Title}"`;
+    const message = `${staffName} (${ticket.Department} Staff) requested status change to "${requestedStatus}" on Ticket #${ticket.TicketId}: "${ticket.Title}"`;
 
-    await run(`
-      INSERT INTO Notifications (UserId, TicketId, Message, Read, CreatedDate)
-      VALUES (NULL, ?, ?, 0, datetime('now'))
-    `, [ticketId, message]);
+    const NotificationId = await getNextSequence('NotificationId');
+    await getCollection('notifications').insertOne({
+      NotificationId,
+      UserId: null,
+      TicketId: ticket.TicketId,
+      Message: message,
+      Read: 0,
+      CreatedDate: now,
+    });
 
-    return await this.findById(ticketId);
+    return await this.findById(ticket.TicketId);
   }
 
   static async approveStatus(ticketId) {
@@ -177,20 +259,33 @@ class Ticket {
     if (!ticket || !ticket.RequestedStatus) return null;
 
     const newStatus = ticket.RequestedStatus;
-    const resolvedDate = newStatus === 'Resolved' || newStatus === 'Closed' ? new Date().toISOString() : null;
+    const now = new Date();
+    const resolvedDate =
+      newStatus === 'Resolved' || newStatus === 'Closed' ? now : null;
 
-    await run(`
-      UPDATE Tickets 
-      SET Status = ?, RequestedStatus = NULL, ResolvedDate = ?, UpdatedDate = datetime('now')
-      WHERE TicketId = ?
-    `, [newStatus, resolvedDate, ticketId]);
+    await getCollection('tickets').updateOne(
+      { TicketId: ticket.TicketId },
+      {
+        $set: {
+          Status: newStatus,
+          RequestedStatus: null,
+          ResolvedDate: resolvedDate,
+          UpdatedDate: now,
+        },
+      }
+    );
 
-    await run(`
-      INSERT INTO Comments (TicketId, UserId, Notes, IsResolutionNote, CreatedDate)
-      VALUES (?, 11, ?, ?, datetime('now'))
-    `, [ticketId, `Support Staff APPROVED stage transition to "${newStatus}".`, newStatus === 'Resolved' ? 1 : 0]);
+    const CommentId = await getNextSequence('CommentId');
+    await getCollection('comments').insertOne({
+      CommentId,
+      TicketId: ticket.TicketId,
+      UserId: 11,
+      Notes: `Support Staff APPROVED stage transition to "${newStatus}".`,
+      IsResolutionNote: newStatus === 'Resolved' ? 1 : 0,
+      CreatedDate: now,
+    });
 
-    return await this.findById(ticketId);
+    return await this.findById(ticket.TicketId);
   }
 
   static async rejectStatus(ticketId, reason) {
@@ -198,58 +293,93 @@ class Ticket {
     if (!ticket) return null;
 
     const requested = ticket.RequestedStatus;
+    const now = new Date();
 
-    await run(`
-      UPDATE Tickets 
-      SET RequestedStatus = NULL, UpdatedDate = datetime('now')
-      WHERE TicketId = ?
-    `, [ticketId]);
+    await getCollection('tickets').updateOne(
+      { TicketId: ticket.TicketId },
+      { $set: { RequestedStatus: null, UpdatedDate: now } }
+    );
 
-    await run(`
-      INSERT INTO Comments (TicketId, UserId, Notes, IsResolutionNote, CreatedDate)
-      VALUES (?, 11, ?, 0, datetime('now'))
-    `, [ticketId, `Support Staff REJECTED requested status change to "${requested}". Reason: ${reason || 'Requires further verification.'}`]);
+    const CommentId = await getNextSequence('CommentId');
+    await getCollection('comments').insertOne({
+      CommentId,
+      TicketId: ticket.TicketId,
+      UserId: 11,
+      Notes: `Support Staff REJECTED requested status change to "${requested}". Reason: ${reason || 'Requires further verification.'}`,
+      IsResolutionNote: 0,
+      CreatedDate: now,
+    });
 
-    return await this.findById(ticketId);
+    return await this.findById(ticket.TicketId);
   }
 
   static async getStaffAvailability(department) {
-    let sql = `
-      SELECT 
-        u.UserId,
-        u.Name,
-        u.Email,
-        u.Department,
-        u.Role,
-        COUNT(CASE WHEN t.Status IN ('Assigned', 'In Progress', 'Pending') THEN 1 END) AS activeTicketsCount
-      FROM Users u
-      LEFT JOIN Tickets t ON u.UserId = t.AssigneeId
-      WHERE u.Role = 'DepartmentStaff'
-    `;
-
-    const params = [];
+    const userQuery = { Role: 'DepartmentStaff' };
     if (department && department !== 'All') {
-      sql += ` AND u.Department = ?`;
-      params.push(department);
+      userQuery.Department = department;
     }
 
-    sql += ` GROUP BY u.UserId, u.Name, u.Email, u.Department, u.Role ORDER BY activeTicketsCount ASC, u.Name ASC`;
+    const [staffUsers, activeCounts] = await Promise.all([
+      getCollection('users')
+        .find(userQuery, { projection: { _id: 0, Password: 0 } })
+        .toArray(),
+      getCollection('tickets')
+        .aggregate([
+          {
+            $match: {
+              AssigneeId: { $ne: null },
+              Status: { $in: ['Assigned', 'In Progress', 'Pending'] },
+            },
+          },
+          {
+            $group: {
+              _id: '$AssigneeId',
+              count: { $sum: 1 },
+            },
+          },
+        ])
+        .toArray(),
+    ]);
 
-    const rows = await all(sql, params);
-    return rows.map((r) => ({
-      ...r,
-      isAvailable: r.activeTicketsCount === 0,
-      workloadStatus: r.activeTicketsCount === 0 ? 'Available (0 Active)' : `${r.activeTicketsCount} Active Tickets`
-    }));
+    const countMap = new Map(activeCounts.map((row) => [row._id, row.count]));
+
+    return staffUsers
+      .map((u) => {
+        const activeTicketsCount = countMap.get(u.UserId) || 0;
+        return {
+          ...u,
+          activeTicketsCount,
+          isAvailable: activeTicketsCount === 0,
+          workloadStatus:
+            activeTicketsCount === 0
+              ? 'Available (0 Active)'
+              : `${activeTicketsCount} Active Tickets`,
+        };
+      })
+      .sort((a, b) => {
+        if (a.activeTicketsCount !== b.activeTicketsCount) {
+          return a.activeTicketsCount - b.activeTicketsCount;
+        }
+        return a.Name.localeCompare(b.Name);
+      });
   }
 
   static async close(ticketId) {
-    const updateSql = `
-      UPDATE Tickets
-      SET Status = 'Closed', RequestedStatus = NULL, ResolvedDate = datetime('now'), UpdatedDate = datetime('now')
-      WHERE TicketId = ?
-    `;
-    return await run(updateSql, [ticketId]);
+    const id = Number(ticketId);
+    if (Number.isNaN(id)) return null;
+
+    const now = new Date();
+    return await getCollection('tickets').updateOne(
+      { TicketId: id },
+      {
+        $set: {
+          Status: 'Closed',
+          RequestedStatus: null,
+          ResolvedDate: now,
+          UpdatedDate: now,
+        },
+      }
+    );
   }
 }
 

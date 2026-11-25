@@ -1,14 +1,14 @@
-const { initDB, get } = require('./database/db');
+const { initDB, closeDB } = require('./database/db');
 const Ticket = require('./models/Ticket');
-const Notification = require('./models/Notification');
 const Comment = require('./models/Comment');
+const User = require('./models/User');
 
 async function runEndToEndSimulation() {
   console.log('Running 3-Role Workflow Test...');
 
   await initDB();
 
-  const employee = await get(`SELECT * FROM Users WHERE Email = 'anushka@company.com'`);
+  const employee = await User.findByEmail('anushka@company.com');
 
   const newTicket = await Ticket.create({
     Title: 'Dual monitor display not recognized after docking station driver update',
@@ -50,10 +50,12 @@ async function runEndToEndSimulation() {
   console.log(`Resolution Note: "${resolutionNote?.Notes}"`);
   console.log('End-to-End Workflow test passed successfully.');
 
+  await closeDB();
   process.exit(0);
 }
 
-runEndToEndSimulation().catch(err => {
+runEndToEndSimulation().catch(async err => {
   console.error('Test failed:', err);
+  await closeDB();
   process.exit(1);
 });

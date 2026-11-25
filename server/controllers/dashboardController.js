@@ -1,69 +1,144 @@
-const { all, get } = require('../database/db');
+const { getCollection } = require('../database/db');
 
 const getDashboardStats = async (req, res, next) => {
   try {
-    const totalRow = await get(`SELECT COUNT(*) as count FROM Tickets`);
-    const openRow = await get(`SELECT COUNT(*) as count FROM Tickets WHERE Status = 'Open'`);
-    const inProgressRow = await get(`SELECT COUNT(*) as count FROM Tickets WHERE Status = 'In Progress' OR Status = 'Assigned'`);
-    const resolvedRow = await get(`SELECT COUNT(*) as count FROM Tickets WHERE Status = 'Resolved'`);
-    const closedRow = await get(`SELECT COUNT(*) as count FROM Tickets WHERE Status = 'Closed'`);
-    const urgentRow = await get(`SELECT COUNT(*) as count FROM Tickets WHERE Priority = 'High'`);
+    const ticketsCol = getCollection('tickets');
+    const categoriesCol = getCollection('categories');
 
-    const byCategory = await all(`
-      SELECT c.Name as category, c.Department as department, COUNT(t.TicketId) as count
-      FROM Categories c
-      LEFT JOIN Tickets t ON c.CategoryId = t.CategoryId
-      GROUP BY c.CategoryId, c.Name, c.Department
-      ORDER BY count DESC
-    `);
-
-    const byDepartment = await all(`
-      SELECT c.Department as department, COUNT(t.TicketId) as count
-      FROM Categories c
-      LEFT JOIN Tickets t ON c.CategoryId = t.CategoryId
-      GROUP BY c.Department
-      ORDER BY count DESC
-    `);
-
-    const byPriority = await all(`
-      SELECT Priority as priority, COUNT(*) as count
-      FROM Tickets
-      GROUP BY Priority
-    `);
-
-    const byStatus = await all(`
-      SELECT Status as status, COUNT(*) as count
-      FROM Tickets
-      GROUP BY Status
-    `);
-
-    const recentTickets = await all(`
-      SELECT 
-        t.TicketId, t.Title, t.Priority, t.Status, t.RequestedStatus, t.CreatedDate,
-        c.Name as CategoryName, c.Department,
-        u.Name as RequesterName
-      FROM Tickets t
-      INNER JOIN Categories c ON t.CategoryId = c.CategoryId
-      INNER JOIN Users u ON t.RequesterId = u.UserId
-      ORDER BY t.CreatedDate DESC
-      LIMIT 10
-    `);
+    const [
+      totalTickets,
+      openTickets,
+      inProgressTickets,
+      resolvedTickets,
+      closedTickets,
+      urgentTickets,
+      byCategory,
+      byDepartment,
+      byPriority,
+      byStatus,
+      recentTickets,
+    ] = await Promise.all([
+      ticketsCol.countDocuments(),
+      ticketsCol.countDocuments({ Status: 'Open' }),
+      ticketsCol.countDocuments({ Status: { $in: ['In Progress', 'Assigned'] } }),
+      ticketsCol.countDocuments({ Status: 'Resolved' }),
+      ticketsCol.countDocuments({ Status: 'Closed' }),
+      ticketsCol.countDocuments({ Priority: 'High' }),
+      categoriesCol
+        .aggregate([
+          {
+            $lookup: {
+              from: 'tickets',
+              localField: 'CategoryId',
+              foreignField: 'CategoryId',
+              as: 'tickets',
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              categoryId: '$CategoryId',
+              category: '$Name',
+              department: '$Department',
+              count: { $size: '$tickets' },
+            },
+          },
+          { $sort: { count: -1 } },
+        ])
+        .toArray(),
+      categoriesCol
+        .aggregate([
+          {
+            $lookup: {
+              from: 'tickets',
+              localField: 'CategoryId',
+              foreignField: 'CategoryId',
+              as: 'tickets',
+            },
+          },
+          {
+            $group: {
+              _id: '$Department',
+              count: { $sum: { $size: '$tickets' } },
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              department: '$_id',
+              count: 1,
+            },
+          },
+          { $sort: { count: -1 } },
+        ])
+        .toArray(),
+      ticketsCol
+        .aggregate([
+          { $group: { _id: '$Priority', count: { $sum: 1 } } },
+          { $project: { _id: 0, priority: '$_id', count: 1 } },
+        ])
+        .toArray(),
+      ticketsCol
+        .aggregate([
+          { $group: { _id: '$Status', count: { $sum: 1 } } },
+          { $project: { _id: 0, status: '$_id', count: 1 } },
+        ])
+        .toArray(),
+      ticketsCol
+        .aggregate([
+          { $sort: { CreatedDate: -1 } },
+          { $limit: 10 },
+          {
+            $lookup: {
+              from: 'categories',
+              localField: 'CategoryId',
+              foreignField: 'CategoryId',
+              as: 'category',
+            },
+          },
+          { $unwind: '$category' },
+          {
+            $lookup: {
+              from: 'users',
+              localField: 'RequesterId',
+              foreignField: 'UserId',
+              as: 'requester',
+            },
+          },
+          { $unwind: '$requester' },
+          {
+            $project: {
+              _id: 0,
+              TicketId: 1,
+              Title: 1,
+              Priority: 1,
+              Status: 1,
+              RequestedStatus: 1,
+              CreatedDate: 1,
+              CategoryName: '$category.Name',
+              Department: '$category.Department',
+              RequesterName: '$requester.Name',
+            },
+          },
+        ])
+        .toArray(),
+    ]);
 
     res.status(200).json({
       success: true,
       data: {
-        totalTickets: totalRow?.count || 0,
-        openTickets: openRow?.count || 0,
-        inProgressTickets: inProgressRow?.count || 0,
-        resolvedTickets: resolvedRow?.count || 0,
-        closedTickets: closedRow?.count || 0,
-        urgentTickets: urgentRow?.count || 0,
+        totalTickets,
+        openTickets,
+        inProgressTickets,
+        resolvedTickets,
+        closedTickets,
+        urgentTickets,
         byCategory,
         byDepartment,
         byPriority,
         byStatus,
-        recentTickets
-      }
+        recentTickets,
+      },
     });
   } catch (error) {
     next(error);
@@ -71,5 +146,5 @@ const getDashboardStats = async (req, res, next) => {
 };
 
 module.exports = {
-  getDashboardStats
+  getDashboardStats,
 };

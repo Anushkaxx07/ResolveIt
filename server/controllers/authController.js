@@ -1,4 +1,78 @@
-const { get } = require('../database/db');
+const User = require('../models/User');
+
+const ALLOWED_ROLES = ['Employee', 'DepartmentStaff', 'SupportStaff'];
+const SUPPORT_DEPARTMENTS = ['IT', 'HR', 'Facilities', 'Finance', 'Access Management'];
+
+function buildSafeUser(user) {
+  return {
+    UserId: user.UserId,
+    Name: user.Name,
+    Email: user.Email,
+    Department: user.Department,
+    Role: user.Role,
+    Token: `${user.Role.toLowerCase()}-token-${user.UserId}-${Date.now()}`
+  };
+}
+
+const register = async (req, res, next) => {
+  try {
+    const { name, email, password, department, role = 'Employee' } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ success: false, message: 'Full name is required' });
+    }
+
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      return res.status(400).json({ success: false, message: 'A valid corporate email address is required' });
+    }
+
+    if (!password || password.length < 6) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+    }
+
+    if (!ALLOWED_ROLES.includes(role)) {
+      return res.status(400).json({ success: false, message: 'Invalid role selected' });
+    }
+
+    const cleanDepartment = (department || '').trim();
+    if (!cleanDepartment) {
+      return res.status(400).json({ success: false, message: 'Department is required' });
+    }
+
+    if (role === 'DepartmentStaff' && !SUPPORT_DEPARTMENTS.includes(cleanDepartment)) {
+      return res.status(400).json({
+        success: false,
+        message: `Department Staff must belong to one of: ${SUPPORT_DEPARTMENTS.join(', ')}`
+      });
+    }
+
+    const existing = await User.findByEmail(email);
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        message: 'An account with this corporate email already exists.'
+      });
+    }
+
+    const createdUser = await User.create({
+      Name: name,
+      Email: email,
+      Password: password,
+      Department: cleanDepartment,
+      Role: role
+    });
+
+    const safeUser = buildSafeUser(createdUser);
+
+    res.status(201).json({
+      success: true,
+      message: `Account created for ${safeUser.Name} (${safeUser.Role}).`,
+      data: safeUser
+    });
+  } catch (error) {
+    next(error);
+  }
+};
 
 const login = async (req, res, next) => {
   try {
@@ -13,13 +87,9 @@ const login = async (req, res, next) => {
     }
 
     const requestedRole = role || 'Employee';
-    const cleanEmail = email.trim().toLowerCase();
     const cleanPassword = password.trim();
 
-    const user = await get(
-      `SELECT UserId, Name, Email, Department, Role, Password FROM Users WHERE LOWER(Email) = LOWER(?)`,
-      [cleanEmail]
-    );
+    const user = await User.findByEmail(email);
 
     if (!user) {
       return res.status(401).json({
@@ -28,11 +98,7 @@ const login = async (req, res, next) => {
       });
     }
 
-    const isPasswordValid =
-      cleanPassword === user.Password ||
-      cleanPassword === 'password123' ||
-      cleanPassword === 'admin123' ||
-      password === user.Password;
+    const isPasswordValid = cleanPassword === user.Password || password === user.Password;
 
     if (!isPasswordValid) {
       return res.status(401).json({
@@ -59,14 +125,7 @@ const login = async (req, res, next) => {
       }
     }
 
-    const safeUser = {
-      UserId: user.UserId,
-      Name: user.Name,
-      Email: user.Email,
-      Department: user.Department,
-      Role: user.Role,
-      Token: `${user.Role.toLowerCase()}-token-${user.UserId}-${Date.now()}`
-    };
+    const safeUser = buildSafeUser(user);
 
     res.status(200).json({
       success: true,
@@ -85,7 +144,7 @@ const getMe = async (req, res, next) => {
       return res.status(401).json({ success: false, message: 'Not authenticated' });
     }
 
-    const user = await get(`SELECT UserId, Name, Email, Department, Role FROM Users WHERE UserId = ?`, [userId]);
+    const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -97,6 +156,7 @@ const getMe = async (req, res, next) => {
 };
 
 module.exports = {
+  register,
   login,
   getMe
 };

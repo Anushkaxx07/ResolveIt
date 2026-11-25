@@ -1,21 +1,26 @@
-const { all, get, run } = require('../database/db');
+const { getCollection } = require('../database/db');
 
 class Category {
   static async findAll(department = null) {
-    let query = `SELECT CategoryId, Name, Department, Description FROM Categories`;
-    const params = [];
-
+    const query = {};
     if (department && department !== 'All') {
-      query += ` WHERE Department = ?`;
-      params.push(department);
+      query.Department = department;
     }
 
-    query += ` ORDER BY Department ASC, Name ASC`;
-    return await all(query, params);
+    return await getCollection('categories')
+      .find(query, { projection: { _id: 0 } })
+      .sort({ Department: 1, Name: 1 })
+      .toArray();
   }
 
   static async findById(categoryId) {
-    return await get(`SELECT * FROM Categories WHERE CategoryId = ?`, [categoryId]);
+    const id = Number(categoryId);
+    if (Number.isNaN(id)) return null;
+
+    return await getCollection('categories').findOne(
+      { CategoryId: id },
+      { projection: { _id: 0 } }
+    );
   }
 }
 
